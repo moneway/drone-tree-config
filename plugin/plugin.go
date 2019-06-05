@@ -1,11 +1,13 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"path"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -276,46 +278,58 @@ func (p *plugin) getAllConfigData(ctx context.Context, req *request, dir string)
 
 }
 
-// return yaml order
-func (p *plugin) getConfigOrder(config yaml.MapSlice) int {
-	for _, elem := range config {
-		if  key, ok := elem.Key.(string); ok && key == orderKey {
-			if  value, ok := elem.Value.(int); ok {
-				return value
-			}
+func (p *plugin) mapCopy(dst, src interface{}) {
+	dv, sv := reflect.ValueOf(dst), reflect.ValueOf(src)
+
+	for _, k := range sv.MapKeys() {
+		dv.SetMapIndex(k, sv.MapIndex(k))
+	}
+}
+
+func (p *plugin) getConfigOrder(config map[string]interface{}) int {
+	if raw, ok := config["order"]; ok {
+		if value, ok := raw.(int); ok {
+			return value
 		}
 	}
 	return 0
 }
 
-// Concatenates config contents
-func (p *plugin) droneConfigCreate(configs []string) (string, error) {
-	var mapSliceArray []yaml.MapSlice
-	for _, a := range configs{
-		m := yaml.MapSlice{}
-		err := yaml.Unmarshal([]byte(a), &m)
-		if err != nil {
-			log.Fatalf("error: %v", err)
-			return "", err
+func (p *plugin) extractSubConfig(config string) (values []map[string]interface{}, err error) {
+	dec := yaml.NewDecoder(strings.NewReader(config))
+	var value map[string]interface{}
+	for err = nil; err == nil; err = dec.Decode(&value) {
+		if value != nil {
+			newValue := map[string]interface{}{}
+			p.mapCopy(newValue, value)
+			values = append(values, newValue)
 		}
-		mapSliceArray = append(mapSliceArray, m)
+	}
+	if err == io.EOF {
+		err = nil
+	}
+	return
+}
+func (p *plugin) droneConfigCreate(configs []string) (string, error) {
+	var fullConfigs []map[string]interface{}
+	for _, config := range configs {
+		if subconfigs, err := p.extractSubConfig(config); err != nil {
+			return "", err
+		} else {
+			fullConfigs = append(fullConfigs, subconfigs...)
+		}
 	}
 
-	sort.SliceStable(mapSliceArray, func(i, j int) bool {
-		return p.getConfigOrder(mapSliceArray[i]) < p.getConfigOrder(mapSliceArray[i])
+	sort.SliceStable(fullConfigs, func(i, j int) bool {
+		return p.getConfigOrder(fullConfigs[i]) < p.getConfigOrder(fullConfigs[j])
 	})
 
-	droneConfig := ""
-	for _, m := range mapSliceArray {
-		a, err := yaml.Marshal(m)
-		if err != nil {
-			log.Fatalf("error: %v", err)
+	writer := bytes.NewBufferString("")
+	encoder := yaml.NewEncoder(writer)
+	for _, m := range fullConfigs {
+		if err := encoder.Encode(m); err != nil {
 			return "", err
 		}
-		if droneConfig != "" {
-			droneConfig += "\n---\n"
-		}
-		droneConfig += string(a) + "\n"
 	}
-	return droneConfig, nil
+	return writer.String(), nil
 }
