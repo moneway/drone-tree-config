@@ -304,6 +304,7 @@ func (p *plugin) extractSubConfig(config string) (values []map[string]interface{
 			p.mapCopy(newValue, value)
 			values = append(values, newValue)
 		}
+		value = map[string]interface{}{}
 	}
 	if err == io.EOF {
 		err = nil
