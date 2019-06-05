@@ -3,7 +3,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/bitsbeats/drone-tree-config/plugin"
+	"github.com/moneway/drone-tree-config/plugin"
 
 	"github.com/drone/drone-go/plugin/config"
 	"github.com/kelseyhightower/envconfig"
