@@ -1,11 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
+	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -19,12 +23,16 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const (
+	orderKey = "order"
+)
+
 // New creates a drone plugin
 func New(server, token string, concat bool, fallback bool) config.Plugin {
 	return &plugin{
-		server: server,
-		token:  token,
-		concat: concat,
+		server:   server,
+		token:    token,
+		concat:   concat,
 		fallback: fallback,
 	}
 }
@@ -51,6 +59,7 @@ type (
 
 var dedupRegex = regexp.MustCompile(`(?ms)(---[\s]*){2,}`)
 
+// MAIN
 func (p *plugin) Find(ctx context.Context, droneRequest *config.Request) (*drone.Config, error) {
 	uuid := uuid.New()
 	logrus.Infof("%s %s/%s started", uuid, droneRequest.Repo.Namespace, droneRequest.Repo.Name)
@@ -107,7 +116,7 @@ func (p *plugin) Find(ctx context.Context, droneRequest *config.Request) (*drone
 	return &drone.Config{Data: configData}, nil
 }
 
-// get repo changes
+// get repo changed files
 func (p *plugin) getGithubChanges(ctx context.Context, req *request) ([]string, error) {
 	var changedFiles []string
 
@@ -192,10 +201,10 @@ func (p *plugin) getGithubDroneConfig(ctx context.Context, req *request, file st
 	return fileContent, false, nil
 }
 
-func (p *plugin) getGithubConfigData(ctx context.Context, req *request, changedFiles []string) (configData string, err error) {
-	// collect drone.yml files
-	configData = ""
+// collect drone.yml files and return the full content concatenate
+func (p *plugin) getGithubConfigData(ctx context.Context, req *request, changedFiles []string) (string, error) {
 	cache := map[string]bool{}
+	var configs []string
 	for _, file := range changedFiles {
 		if !strings.HasPrefix(file, "/") {
 			file = "/" + file
@@ -226,7 +235,7 @@ func (p *plugin) getGithubConfigData(ctx context.Context, req *request, changedF
 			}
 
 			// append
-			configData = p.droneConfigAppend(configData, fileContent)
+			configs = append(configs, fileContent)
 			logrus.Infof("%s found %s/%s %s", req.UUID, req.Repo.Namespace, req.Repo.Name, file)
 			if !p.concat {
 				logrus.Infof("%s concat is disabled. Using just first .drone.yml.", req.UUID)
@@ -234,11 +243,11 @@ func (p *plugin) getGithubConfigData(ctx context.Context, req *request, changedF
 			}
 		}
 	}
-	return configData, nil
+	return p.droneConfigCreate(configs)
 }
 
 // search for all or fist drone.yml in repo
-func (p *plugin) getAllConfigData(ctx context.Context, req *request, dir string) (configData string, err error) {
+func (p *plugin) getAllConfigData(ctx context.Context, req *request, dir string) (string, error) {
 	ref := github.RepositoryContentGetOptions{Ref: req.Build.After}
 	_, ls, _, err := req.Client.Repositories.GetContents(ctx, req.Repo.Namespace, req.Repo.Name, dir, &ref)
 	if err != nil {
@@ -246,7 +255,7 @@ func (p *plugin) getAllConfigData(ctx context.Context, req *request, dir string)
 	}
 
 	// check recursivly for drone.yml
-	configData = ""
+	var configs []string
 	for _, f := range ls {
 		var fileContent string
 		if *f.Type == "dir" {
@@ -259,23 +268,71 @@ func (p *plugin) getAllConfigData(ctx context.Context, req *request, dir string)
 			}
 		}
 		// append
-		configData = p.droneConfigAppend(configData, fileContent)
+		configs = append(configs, fileContent)
 		if !p.concat {
 			logrus.Infof("%s concat is disabled. Using just first .drone.yml.", req.UUID)
 			break
 		}
 	}
-
-	return configData, nil
+	return p.droneConfigCreate(configs)
 
 }
 
-func (p *plugin) droneConfigAppend(droneConfig string, appends ...string) string {
-	for _, a := range appends {
-		if droneConfig != "" {
-			droneConfig += "\n---\n"
-		}
-		droneConfig += a + "\n"
+func (p *plugin) mapCopy(dst, src interface{}) {
+	dv, sv := reflect.ValueOf(dst), reflect.ValueOf(src)
+
+	for _, k := range sv.MapKeys() {
+		dv.SetMapIndex(k, sv.MapIndex(k))
 	}
-	return droneConfig
+}
+
+func (p *plugin) getConfigOrder(config map[string]interface{}) int {
+	if raw, ok := config["order"]; ok {
+		if value, ok := raw.(int); ok {
+			return value
+		} else {
+			logrus.Error("The 'order' field must be an int")
+		}
+	}
+	return 0
+}
+
+func (p *plugin) extractSubConfig(config string) (values []map[string]interface{}, err error) {
+	dec := yaml.NewDecoder(strings.NewReader(config))
+	var value map[string]interface{}
+	for err = nil; err == nil; err = dec.Decode(&value) {
+		if value != nil {
+			newValue := map[string]interface{}{}
+			p.mapCopy(newValue, value)
+			values = append(values, newValue)
+		}
+		value = map[string]interface{}{}
+	}
+	if err == io.EOF {
+		err = nil
+	}
+	return
+}
+func (p *plugin) droneConfigCreate(configs []string) (string, error) {
+	var fullConfigs []map[string]interface{}
+	for _, config := range configs {
+		if subconfigs, err := p.extractSubConfig(config); err != nil {
+			return "", err
+		} else {
+			fullConfigs = append(fullConfigs, subconfigs...)
+		}
+	}
+
+	sort.SliceStable(fullConfigs, func(i, j int) bool {
+		return p.getConfigOrder(fullConfigs[i]) < p.getConfigOrder(fullConfigs[j])
+	})
+
+	writer := bytes.NewBufferString("")
+	encoder := yaml.NewEncoder(writer)
+	for _, m := range fullConfigs {
+		if err := encoder.Encode(m); err != nil {
+			return "", err
+		}
+	}
+	return writer.String(), nil
 }
