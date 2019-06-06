@@ -290,6 +290,8 @@ func (p *plugin) getConfigOrder(config map[string]interface{}) int {
 	if raw, ok := config["order"]; ok {
 		if value, ok := raw.(int); ok {
 			return value
+		} else {
+			logrus.Error("The 'order' field must be an int")
 		}
 	}
 	return 0
