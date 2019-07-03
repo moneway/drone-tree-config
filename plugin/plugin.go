@@ -23,10 +23,6 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-const (
-	orderKey = "order"
-)
-
 // New creates a drone plugin
 func New(server, token string, concat bool, fallback bool) config.Plugin {
 	return &plugin{
@@ -55,7 +51,65 @@ type (
 		UUID   uuid.UUID
 		Client *github.Client
 	}
+
+	Config map[string]interface{}
 )
+
+func (cfg Config) getOrder() int {
+	if raw, ok := cfg["order"]; ok {
+		if value, ok := raw.(int); ok {
+			return value
+		} else {
+			logrus.Error("The 'order' field must be an int")
+		}
+	}
+	return 0
+}
+
+func (cfg Config) getName() string {
+	if raw, ok := cfg["name"]; ok {
+		if value, ok := raw.(string); ok {
+			return value
+		} else {
+			logrus.Error("The 'name' field must be a string")
+		}
+	}
+	return ""
+}
+
+func (cfg Config) addDependence(name string) {
+	var deps []string
+	if raw, ok := cfg["depends_on"]; ok {
+		if value, ok := raw.([]string); ok {
+			deps = value
+		}
+	}
+	deps = append(deps, name)
+	cfg["depends_on"] = deps
+}
+
+func (cfg Config) extractOrderDependences() []int {
+	var raw interface{}
+	var ok bool
+	if raw, ok = cfg["depends_on_order"]; !ok {
+		return []int{}
+	}
+	var values []interface{}
+	if values, ok = raw.([]interface{}); !ok {
+		logrus.Error("The 'depends_on_order' field must be an int array")
+		return []int{}
+	}
+	deps := []int{}
+	for _, value := range values {
+		if realvalue, ok := value.(int); ok {
+			deps = append(deps, realvalue)
+		} else {
+			logrus.Error("The 'depends_on_order' field must be an int array")
+		}
+	}
+	delete(cfg, "depends_on_order")
+	return deps
+}
 
 var dedupRegex = regexp.MustCompile(`(?ms)(---[\s]*){2,}`)
 
@@ -286,35 +340,44 @@ func (p *plugin) mapCopy(dst, src interface{}) {
 	}
 }
 
-func (p *plugin) getConfigOrder(config map[string]interface{}) int {
-	if raw, ok := config["order"]; ok {
-		if value, ok := raw.(int); ok {
-			return value
-		} else {
-			logrus.Error("The 'order' field must be an int")
-		}
-	}
-	return 0
-}
-
-func (p *plugin) extractSubConfig(config string) (values []map[string]interface{}, err error) {
+func (p *plugin) extractSubConfig(config string) (values []Config, err error) {
 	dec := yaml.NewDecoder(strings.NewReader(config))
-	var value map[string]interface{}
+	var value Config
 	for err = nil; err == nil; err = dec.Decode(&value) {
 		if value != nil {
-			newValue := map[string]interface{}{}
+			newValue := Config{}
 			p.mapCopy(newValue, value)
 			values = append(values, newValue)
 		}
-		value = map[string]interface{}{}
+		value = Config{}
 	}
 	if err == io.EOF {
 		err = nil
 	}
 	return
 }
+
+func (p *plugin) substituteDepends(configs []Config) []Config {
+	sortedConfigs := map[int][]Config{}
+	for _, cfg := range configs {
+		order := cfg.getOrder()
+		sortedConfigs[order] = append(sortedConfigs[order], cfg)
+	}
+	for _, cfg := range configs {
+		deps := cfg.extractOrderDependences()
+		for _, dep := range deps {
+			if values, ok := sortedConfigs[dep]; ok {
+				for _, value := range values {
+					cfg.addDependence(value.getName())
+				}
+			}
+		}
+	}
+	return configs
+}
+
 func (p *plugin) droneConfigCreate(configs []string) (string, error) {
-	var fullConfigs []map[string]interface{}
+	var fullConfigs []Config
 	for _, config := range configs {
 		if subconfigs, err := p.extractSubConfig(config); err != nil {
 			return "", err
@@ -324,8 +387,10 @@ func (p *plugin) droneConfigCreate(configs []string) (string, error) {
 	}
 
 	sort.SliceStable(fullConfigs, func(i, j int) bool {
-		return p.getConfigOrder(fullConfigs[i]) < p.getConfigOrder(fullConfigs[j])
+		return fullConfigs[i].getOrder() < fullConfigs[j].getOrder()
 	})
+
+	fullConfigs = p.substituteDepends(fullConfigs)
 
 	writer := bytes.NewBufferString("")
 	encoder := yaml.NewEncoder(writer)
