@@ -399,5 +399,7 @@ func (p *plugin) droneConfigCreate(configs []string) (string, error) {
 			return "", err
 		}
 	}
-	return writer.String(), nil
+	newConfig := writer.String()
+	logrus.Info(newConfig)
+	return newConfig, nil
 }
