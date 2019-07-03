@@ -394,12 +394,15 @@ func (p *plugin) droneConfigCreate(configs []string) (string, error) {
 
 	writer := bytes.NewBufferString("")
 	encoder := yaml.NewEncoder(writer)
+	fmt.Print("Pipelines : ")
 	for _, m := range fullConfigs {
+		fmt.Print(m.getName())
 		if err := encoder.Encode(m); err != nil {
 			return "", err
 		}
 	}
 	newConfig := writer.String()
-	logrus.Info(newConfig)
+	fmt.Print("Full configs : ")
+	fmt.Print(newConfig)
 	return newConfig, nil
 }
